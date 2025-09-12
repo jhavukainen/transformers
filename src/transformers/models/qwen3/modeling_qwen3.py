@@ -57,11 +57,6 @@ class Qwen3RMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # input_dtype = hidden_states.dtype
-        # hidden_states = hidden_states.to(torch.float32)
-        # variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        # hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        # return self.weight * hidden_states.to(input_dtype)
         return nn.functional.rms_norm(hidden_states, self.weight.shape, weight=self.weight, eps=self.variance_epsilon)
 
     def extra_repr(self):
@@ -84,21 +79,23 @@ class Qwen3MLP(nn.Module):
         return down_proj
 
 
-# def rotate_half(x):
-#     """Rotates half the hidden dims of the input."""
-#     x1 = x[..., : x.shape[-1] // 2]
-#     x2 = x[..., x.shape[-1] // 2 :]
-#     return torch.cat((-x2, x1), dim=-1)
-
 def rope(x, eix):
-    orig_dtype = x.dtype
-    x = x.to(torch.float)
+
+    # complex creation from bf16 not supported in PyTorch. Upcast to fp32
+    needs_cast = (x.dtype == torch.bfloat16)
+    if needs_cast:
+        x = x.to(torch.float32)
+
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 : x.shape[-1]]
 
     xc = torch.complex(x1,x2)
     z = torch.multiply(xc, eix)
-    return torch.cat((z.real, z.imag), dim=-1).to(orig_dtype)
+    result = torch.cat((z.real, z.imag), dim=-1)
+    if needs_cast:
+        result = result.to(torch.bfloat16)
+
+    return result
 
 def apply_rotary_pos_emb(q, k, eix, position_ids=None, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
@@ -106,8 +103,7 @@ def apply_rotary_pos_emb(q, k, eix, position_ids=None, unsqueeze_dim=1):
     Args:
         q (`torch.Tensor`): The query tensor.
         k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        eix (`torch.Tensor`): Rotary embedding in polar coordinates.
         position_ids (`torch.Tensor`, *optional*):
             Deprecated and unused.
         unsqueeze_dim (`int`, *optional*, defaults to 1):
@@ -120,12 +116,6 @@ def apply_rotary_pos_emb(q, k, eix, position_ids=None, unsqueeze_dim=1):
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
-    # cos = cos.unsqueeze(unsqueeze_dim)
-    # sin = sin.unsqueeze(unsqueeze_dim)
-    # q_embed = (q * cos) + (rotate_half(q) * sin)
-    # k_embed = (k * cos) + (rotate_half(k) * sin)
-
-    eix = eix[..., :eix.shape[-1] // 2]
     q_embed = rope(q, eix)
     k_embed = rope(k, eix)
 
@@ -342,7 +332,7 @@ class Qwen3RotaryEmbedding(nn.Module):
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):  # Force float32
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
+            emb = freqs
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
 
