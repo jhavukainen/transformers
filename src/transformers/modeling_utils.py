@@ -4264,8 +4264,18 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
                 merged_state_dict = state_dict
             elif checkpoint_files is not None and checkpoint_files[0].endswith(".safetensors") and state_dict is None:
                 merged_state_dict = {}
+                dm = load_config.device_map
+                if isinstance(dm, dict) and len(set(dm.values())) == 1:
+                    dm = next(iter(dm.values()))
+                sd_device = "cpu"
+                try:
+                    candidate = torch.device(dm)
+                    if candidate.type == "mps":
+                        sd_device = str(candidate)
+                except (RuntimeError, ValueError, TypeError):
+                    pass
                 for file in checkpoint_files:
-                    file_pointer = safe_open(file, framework="pt", device="cpu")
+                    file_pointer = safe_open(file, framework="pt", device=sd_device)
                     all_pointer.add(file_pointer)
                     for k in file_pointer.keys():
                         merged_state_dict[k] = file_pointer.get_slice(k)  # don't materialize yet
